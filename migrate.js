@@ -561,20 +561,18 @@ class MongoMigrationTool {
             this.logger.info(`🔄 Worker ${workerId} started processing ${workerCollections.length} collections`);
 
             for (const collection of workerCollections) {
-                this.logger.info(`📦 Worker ${workerId}: Starting dump of collection '${collection}'`);
-
                 try {
                     const args = [
                         '--uri', sourceConfig.uri,
                         '--db', sourceConfig.database,
                         '--collection', collection,
-                        '--out', dumpPath
+                        '--out', dumpPath,
+                        '--verbose'
                     ];
 
-                    await this.executeCommand('mongodump', args);
+                    await this.executeCommand('mongodump', args, workerId, collection);
 
                     results.successful.push(collection);
-                    this.logger.success(`✅ Worker ${workerId}: Successfully dumped collection '${collection}'`);
 
                 } catch (error) {
                     results.failed.push({ collection, error: error.message, worker: workerId });
@@ -649,8 +647,6 @@ class MongoMigrationTool {
             this.logger.info(`🔄 Worker ${workerId} started processing ${workerCollections.length} collections`);
 
             for (const collection of workerCollections) {
-                this.logger.info(`📦 Worker ${workerId}: Starting restore of collection '${collection}'`);
-
                 try {
                     const collectionDumpPath = path.join(dumpPath, sourceDumpDir, `${collection}.bson`);
 
@@ -665,13 +661,13 @@ class MongoMigrationTool {
                         '--uri', destConfig.uri,
                         '--db', destConfig.database,
                         '--collection', collection,
+                        '--verbose',
                         collectionDumpPath
                     ];
 
-                    await this.executeCommand('mongorestore', args);
+                    await this.executeCommand('mongorestore', args, workerId, collection);
 
                     results.successful.push(collection);
-                    this.logger.success(`✅ Worker ${workerId}: Successfully restored collection '${collection}'`);
 
                 } catch (error) {
                     results.failed.push({ collection, error: error.message, worker: workerId });
@@ -697,7 +693,7 @@ class MongoMigrationTool {
         }
     }
 
-    async executeCommand(command, args) {
+    async executeCommand(command, args, workerId = null, collection = null) {
         return new Promise((resolve, reject) => {
             const process = spawn(command, args, {
                 stdio: ['pipe', 'pipe', 'pipe']
@@ -705,18 +701,188 @@ class MongoMigrationTool {
 
             let stdout = '';
             let stderr = '';
+            let progressState = {
+                lastPercent: null,
+                totalDocs: null,
+                processedDocs: 0,
+                startTime: Date.now(),
+                lastUpdateTime: Date.now(),
+                hasShownProgress: false
+            };
+
+            const operation = command === 'mongodump' ? 'Dumping' : 'Restoring';
+            const emoji = command === 'mongodump' ? '📤' : '📥';
+            const workerTag = workerId ? `W${workerId}` : '';
+
+            // Show initial progress immediately for every collection
+            if (collection) {
+                const initialProgressBar = '░'.repeat(20);
+                this.logger.info(`${emoji} ${workerTag} ${chalk.cyan(collection)} ${initialProgressBar} 0.0% │ Starting... │ 0.0s`);
+                progressState.hasShownProgress = true;
+            }
+
+            const createProgressBar = (percent, width = 20) => {
+                const filled = Math.round((percent / 100) * width);
+                const empty = width - filled;
+                return '█'.repeat(filled) + '░'.repeat(empty);
+            };
+
+            const formatDuration = (ms) => {
+                if (ms < 1000) return `${ms}ms`;
+                if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+                return `${(ms / 60000).toFixed(1)}m`;
+            };
+
+            const logProgress = (percent, docs = null, isComplete = false) => {
+                const now = Date.now();
+                const elapsed = formatDuration(now - progressState.startTime);
+                const progressBar = createProgressBar(percent);
+
+                let message = `${emoji} ${workerTag} ${chalk.cyan(collection)} `;
+                message += `${progressBar} ${percent.toFixed(1)}%`;
+
+                if (docs) {
+                    const rate = progressState.processedDocs / ((now - progressState.startTime) / 1000);
+                    message += ` │ ${docs.toLocaleString()} docs`;
+                    if (rate > 0) {
+                        message += ` │ ${rate.toFixed(0)}/s`;
+                    }
+                }
+
+                message += ` │ ${elapsed}`;
+
+                if (isComplete) {
+                    this.logger.success(message);
+                } else {
+                    this.logger.info(message);
+                }
+            };
 
             process.stdout.on('data', (data) => {
-                stdout += data.toString();
-                this.logger.debug(`${command} stdout: ${data.toString().trim()}`);
+                const output = data.toString();
+                stdout += output;
+
+                // Enhanced progress parsing
+                const lines = output.split('\n');
+                for (const line of lines) {
+                    // Parse document count
+                    const docMatch = line.match(/(\d+)\s+document\(s\)/);
+                    if (docMatch && collection) {
+                        progressState.processedDocs = parseInt(docMatch[1]);
+
+                        // Always show progress when we detect documents
+                        if (progressState.lastPercent === null) {
+                            logProgress(0, progressState.processedDocs);
+                            progressState.lastPercent = 0;
+                            progressState.lastUpdateTime = Date.now();
+                        }
+                    }                    // Parse percentage
+                    const percentMatch = line.match(/(\d+(?:\.\d+)?)%/);
+                    if (percentMatch && collection) {
+                        const percent = parseFloat(percentMatch[1]);
+                        const now = Date.now();
+
+                        // More frequent logging for better visibility
+                        // Log progress every 2% or every 2 seconds for small collections
+                        const percentThreshold = !progressState.lastPercent || (percent - progressState.lastPercent) >= 2;
+                        const timeThreshold = (now - progressState.lastUpdateTime) >= 2000;
+                        const firstProgress = progressState.lastPercent === null;
+
+                        if (percentThreshold || timeThreshold || firstProgress || percent >= 100) {
+                            logProgress(percent, progressState.processedDocs);
+                            progressState.lastPercent = percent;
+                            progressState.lastUpdateTime = now;
+                        }
+                    }
+
+                    // Check for completion
+                    if ((line.includes('done dumping') || line.includes('done restoring')) && collection) {
+                        logProgress(100, progressState.processedDocs, true);
+                    }
+                }
+
+                this.logger.debug(`${command} stdout: ${output.trim()}`);
             });
 
             process.stderr.on('data', (data) => {
-                stderr += data.toString();
-                this.logger.debug(`${command} stderr: ${data.toString().trim()}`);
+                const output = data.toString();
+                stderr += output;
+
+                // Enhanced progress parsing from stderr
+                const lines = output.split('\n');
+                for (const line of lines) {
+                    // Parse document count from stderr
+                    const docMatch = line.match(/(\d+)\s+document\(s\)/);
+                    if (docMatch && collection) {
+                        progressState.processedDocs = parseInt(docMatch[1]);
+
+                        // Always show progress when we detect documents from stderr
+                        if (progressState.lastPercent === null) {
+                            logProgress(0, progressState.processedDocs);
+                            progressState.lastPercent = 0;
+                            progressState.lastUpdateTime = Date.now();
+                        }
+                    }
+
+                    // Parse percentage from stderr
+                    const percentMatch = line.match(/(\d+(?:\.\d+)?)%/);
+                    if (percentMatch && collection) {
+                        const percent = parseFloat(percentMatch[1]);
+                        const now = Date.now();
+
+                        // More frequent logging for better visibility
+                        const percentThreshold = !progressState.lastPercent || (percent - progressState.lastPercent) >= 2;
+                        const timeThreshold = (now - progressState.lastUpdateTime) >= 2000;
+                        const firstProgress = progressState.lastPercent === null;
+
+                        if (percentThreshold || timeThreshold || firstProgress || percent >= 100) {
+                            logProgress(percent, progressState.processedDocs);
+                            progressState.lastPercent = percent;
+                            progressState.lastUpdateTime = now;
+                        }
+                    }
+
+                    // Parse total documents from mongostat-like output
+                    const totalMatch = line.match(/(\d+)\s+of\s+(\d+)/);
+                    if (totalMatch && collection) {
+                        progressState.processedDocs = parseInt(totalMatch[1]);
+                        progressState.totalDocs = parseInt(totalMatch[2]);
+
+                        if (progressState.totalDocs > 0) {
+                            const percent = (progressState.processedDocs / progressState.totalDocs) * 100;
+                            const now = Date.now();
+
+                            // More frequent logging for calculated percentages too
+                            const percentThreshold = !progressState.lastPercent || (percent - progressState.lastPercent) >= 2;
+                            const timeThreshold = (now - progressState.lastUpdateTime) >= 2000;
+                            const firstProgress = progressState.lastPercent === null;
+
+                            if (percentThreshold || timeThreshold || firstProgress || percent >= 100) {
+                                logProgress(percent, progressState.processedDocs);
+                                progressState.lastPercent = percent;
+                                progressState.lastUpdateTime = now;
+                            }
+                        }
+                    }
+
+                    // Log errors and warnings with better formatting
+                    if (line.includes('error') || line.includes('Error') || line.includes('failed')) {
+                        this.logger.warn(`⚠️ ${workerTag} ${chalk.yellow(collection)}: ${line.trim()}`);
+                    }
+                }
+
+                this.logger.debug(`${command} stderr: ${output.trim()}`);
             });
 
             process.on('close', (code) => {
+                // Ensure we always show completion for every collection
+                if (collection && code === 0) {
+                    // If we haven't shown any progress beyond the initial, show a completion log
+                    if (progressState.lastPercent === null || progressState.lastPercent < 100) {
+                        logProgress(100, progressState.processedDocs || null, true);
+                    }
+                }
+
                 if (code === 0) {
                     resolve({ stdout, stderr });
                 } else {

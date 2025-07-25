@@ -122,12 +122,19 @@ mongodb://localhost:27017/?authSource=admin
 
 ## Logging
 
-The tool provides comprehensive logging with different levels and parallel worker tracking:
+The tool provides comprehensive logging with different levels, parallel worker tracking, and real-time progress monitoring:
 
 - **DEBUG**: Detailed command output and execution info
 - **INFO**: General progress information and worker status
 - **SUCCESS**: Successful operation confirmations with worker identification
 - **WARN**: Warning messages
+- **ERROR**: Error messages and failures with worker identification
+
+### Progress Monitoring
+- **📊 Document Count**: Real-time tracking of processed documents per collection
+- **📈 Percentage Progress**: Progress percentage updates (logged every 10% increment)
+- **⏱️ Time Estimates**: Time-based progress indicators from MongoDB tools
+- **✅ Completion Status**: Clear indication when operations complete
 - **ERROR**: Error messages and failures with worker identification
 
 ### Parallel Processing Logs
@@ -146,6 +153,7 @@ Additional documentation is available in the `docs/` folder:
 - [`docs/COLLECTION-SELECTOR.md`](docs/COLLECTION-SELECTOR.md) - Collection selection interface guide
 - [`docs/EXAMPLES.md`](docs/EXAMPLES.md) - Usage examples and common scenarios
 - [`docs/PARALLEL-IMPROVEMENTS.md`](docs/PARALLEL-IMPROVEMENTS.md) - Parallel processing features
+- [`docs/PROGRESS-LOGGING.md`](docs/PROGRESS-LOGGING.md) - Enhanced progress monitoring and logging
 
 ## Testing
 
