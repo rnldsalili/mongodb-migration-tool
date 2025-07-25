@@ -1,0 +1,31 @@
+{
+    "name": "mongodb-migration-tool",
+    "version": "1.0.0",
+    "description": "Interactive MongoDB migration tool using mongodump and mongorestore",
+    "main": "migrate.js",
+    "type": "module",
+    "scripts": {
+        "start": "bun run migrate.js",
+        "migrate": "bun run migrate.js",
+        "check": "bun run check-prerequisites.js",
+        "test": "bun run test.js",
+        "setup": "bun run setup.js"
+    },
+    "dependencies": {
+        "chalk": "^5.3.0",
+        "dotenv": "^17.2.1",
+        "inquirer": "^9.2.12",
+        "mongodb": "^6.3.0",
+        "ora": "^8.0.1"
+    },
+    "keywords": [
+        "mongodb",
+        "migration",
+        "database",
+        "mongodump",
+        "mongorestore",
+        "bun"
+    ],
+    "author": "",
+    "license": ""
+}
