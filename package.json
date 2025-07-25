@@ -8,7 +8,10 @@
         "start": "bun run migrate.js",
         "migrate": "bun run migrate.js",
         "check": "bun run check-prerequisites.js",
-        "test": "bun run test.js",
+        "test": "bun run tests/test.js",
+        "test-parallel": "bun run tests/test-parallel.js",
+        "test-selector": "bun run tests/test-collection-selector.js",
+        "test-inquirer": "bun run tests/test-inquirer.js",
         "setup": "bun run setup.js"
     },
     "dependencies": {

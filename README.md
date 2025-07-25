@@ -7,9 +7,11 @@ An interactive MongoDB migration tool built with Bun.js that uses `mongodump` an
 - 🔄 **Interactive CLI**: User-friendly prompts for configuration
 - 🎯 **Selective Migration**: Choose specific collections or migrate all
 - 🔗 **Flexible Connections**: Support for different source and destination connection strings
+- ⚡ **Parallel Processing**: Configurable number of parallel dump/restore processes (1-10)
 - 📊 **Detailed Logging**: Comprehensive progress tracking and error reporting
 - 🛡️ **Connection Validation**: Verify connections before migration
 - 🧹 **Automatic Cleanup**: Temporary files are cleaned up automatically
+- 🚫 **Smart Filtering**: Automatically excludes system collections (system.*, fs.*, oplog.rs, etc.)
 - ⚡ **Built with Bun.js**: Fast JavaScript runtime for optimal performance
 
 ## Prerequisites
@@ -78,25 +80,29 @@ bun run migrate
 The tool will guide you through the migration process:
 
 1. **Connection Configuration**
-   - Source MongoDB URI
+   - Source MongoDB URI or predefined connection
    - Source database name
-   - Destination MongoDB URI
+   - Destination MongoDB URI or predefined connection
    - Destination database name
    - Option to drop destination database
+   - Number of parallel processes (1-10, default: 3)
 
 2. **Collection Selection**
-   - View all available collections
-   - Select specific collections or choose "All collections"
+   - View all available collections (sorted alphabetically)
+   - Interactive selection with navigation (↑/↓)
+   - Toggle individual collections (Space)
+   - Toggle all collections at once (a key)
+   - Visual indicators for selected collections
 
 3. **Migration Confirmation**
-   - Review migration summary
+   - Review migration summary including parallel processes
    - Confirm to proceed
 
 4. **Migration Execution**
-   - Data dump from source
+   - Parallel data dump from source
    - Optional destination database drop
-   - Data restore to destination
-   - Progress tracking and logging
+   - Parallel data restore to destination
+   - Progress tracking and logging with worker identification
 
 ## Connection String Examples
 
@@ -116,15 +122,45 @@ mongodb://localhost:27017/?authSource=admin
 
 ## Logging
 
-The tool provides comprehensive logging with different levels:
+The tool provides comprehensive logging with different levels and parallel worker tracking:
 
 - **DEBUG**: Detailed command output and execution info
-- **INFO**: General progress information
-- **SUCCESS**: Successful operation confirmations
+- **INFO**: General progress information and worker status
+- **SUCCESS**: Successful operation confirmations with worker identification
 - **WARN**: Warning messages
-- **ERROR**: Error messages and failures
+- **ERROR**: Error messages and failures with worker identification
 
-All logs include timestamps for tracking migration progress.
+### Parallel Processing Logs
+- **Worker Assignment**: Shows which collections are assigned to each worker
+- **Worker Status**: Real-time updates from each worker
+- **Progress Tracking**: Individual collection processing status per worker
+- **Summary Reports**: Detailed success/failure counts after each phase
+
+All logs include timestamps for precise tracking of migration progress.
+
+## Documentation
+
+Additional documentation is available in the `docs/` folder:
+
+- [`docs/USAGE.md`](docs/USAGE.md) - Detailed usage instructions and examples
+- [`docs/COLLECTION-SELECTOR.md`](docs/COLLECTION-SELECTOR.md) - Collection selection interface guide
+- [`docs/EXAMPLES.md`](docs/EXAMPLES.md) - Usage examples and common scenarios
+- [`docs/PARALLEL-IMPROVEMENTS.md`](docs/PARALLEL-IMPROVEMENTS.md) - Parallel processing features
+
+## Testing
+
+Test files are available in the `tests/` folder:
+
+```bash
+# Run basic functionality test
+bun run test
+
+# Test parallel processing simulation
+bun run test-parallel
+
+# Test enhanced collection selector
+bun run test-selector
+```
 
 ## Error Handling
 
@@ -143,6 +179,19 @@ The tool creates a temporary directory (`temp-migration`) for storing dump files
 - Confirmation prompt before starting migration
 - Optional destination database drop (disabled by default)
 - Masked credentials in summary display
+- **Smart collection filtering**: Automatically excludes system collections
+
+### Excluded Collections
+
+The tool automatically filters out system collections that shouldn't be migrated:
+
+- **System collections**: `system.*` (system.views, system.users, etc.)
+- **GridFS collections**: `fs.*` (fs.files, fs.chunks)
+- **Replica set oplog**: `oplog.rs`
+- **Schema collections**: `__schema`
+- **Views**: Only actual collections are included, views are excluded
+
+This prevents authorization errors and ensures only user data collections are migrated.
 
 ## Troubleshooting
 

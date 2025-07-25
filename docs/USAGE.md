@@ -1,8 +1,45 @@
 # MongoDB Migration Tool - Usage Guide
 
-## Quick Start
+## Quick### 5. Migration Confirmation
+Review the migration summary:
+- Source and destination details (credentials are masked)
+- Selected collections
+- Drop target setting
+- Number of parallel processes
 
-1. **Check Prerequisites**
+### 6. Migration Execution
+The tool will:
+1. Create temporary directory for dump files
+2. Dump selected collections from source database (in parallel)
+3. Optionally drop destination database
+4. Restore collections to destination database (in parallel)
+5. Clean up temporary files
+
+## Advanced Features
+
+### Parallel Processing
+The tool supports 1-10 parallel workers for dump and restore operations:
+- **Worker Distribution**: Collections are evenly distributed among workers
+- **Real-time Logging**: Each worker reports its progress individually
+- **Worker Identification**: All logs include worker ID for easy tracking
+- **Error Handling**: Failed collections are reported per worker with details
+- **Summary Reports**: Detailed success/failure counts after each phase
+
+Example parallel processing log output:
+```
+[INFO]  2025-07-25 11:36:09 - 👥 Starting 3 workers:
+[INFO]  2025-07-25 11:36:09 -    Worker 1: 2 collections [users, categories]
+[INFO]  2025-07-25 11:36:09 -    Worker 2: 2 collections [products, reviews]
+[INFO]  2025-07-25 11:36:09 -    Worker 3: 2 collections [orders, inventory]
+[INFO]  2025-07-25 11:36:09 - 🔄 Worker 1 started processing 2 collections
+[SUCCESS] 2025-07-25 11:36:10 - ✅ Worker 1: Successfully processed collection 'users'
+```
+
+### Performance Recommendations
+- **Small Collections (< 1GB each)**: Use 5-8 parallel processes
+- **Large Collections (> 1GB each)**: Use 2-3 parallel processes
+- **Mixed Sizes**: Use default 3 parallel processes
+- **Limited Resources**: Use 1-2 parallel processesCheck Prerequisites**
    ```bash
    bun run check
    ```
@@ -36,12 +73,54 @@ If you have set up a `.env` file with predefined connections:
 
 For both source and destination databases, you can mix and match methods (e.g., predefined source, manual destination).
 
-### 3. Collection Selection
-You can choose:
-- **All collections**: Migrate everything in the database
-- **Specific collections**: Select individual collections from a list
+### 3. Performance Configuration
+Configure parallel processing for optimal performance:
+- **Parallel Processes**: Choose 1-10 parallel workers (default: 3)
+  - More workers = faster processing for many small collections
+  - Fewer workers = better for large collections or limited resources
+  - Recommended: 3-5 for most scenarios
 
-### 4. Migration Confirmation
+### 4. Collection Selection
+Enhanced interactive selection interface:
+- **Navigation**: Use ↑/↓ arrow keys to move between collections
+- **Individual Selection**: Press Space to toggle individual collections
+- **Select/Unselect All**: Press "a" to toggle all collections at once
+- **Visual Feedback**: Selected collections are highlighted in green with ☑️
+- **Selection Counter**: Shows current selection count (e.g., "Selected: 3/8 collections")
+- **Preview**: View selected collection names at the bottom
+
+#### Selection Controls:
+- `↑/↓` - Navigate up/down through collections
+- `Space` - Toggle selection of current collection  
+- `a` - Toggle all collections (select all if none/some selected, unselect all if all selected)
+- `Enter` - Confirm selection and proceed
+- `q` - Quit/cancel selection
+
+Example interface:
+```
+📦 Select collections to migrate:
+
+Controls:
+  ↑/↓  - Navigate
+  Space - Toggle selection  
+  a     - Toggle all collections
+  Enter - Confirm selection
+  q     - Quit
+
+▶ ☑️ 📄 analytics
+  ☐ 📄 categories
+  ☑️ 📄 inventory
+  ☐ 📄 logs
+  ☑️ 📄 orders
+  ☐ 📄 products
+  ☐ 📄 reviews
+  ☐ 📄 users
+
+Selected: 3/8 collections
+[analytics, inventory, orders]
+```
+
+### 5. Migration Confirmation
 Review the migration summary:
 - Source and destination details (credentials are masked)
 - Selected collections

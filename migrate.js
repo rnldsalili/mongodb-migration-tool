@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import { promisify } from 'util';
+import readline from 'readline';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import ora from 'ora';
@@ -49,6 +50,7 @@ class MongoMigrationTool {
 
             // Get collections to migrate
             const collections = await this.selectCollections(config.source);
+            this.logger.info('🎯 Collection selection completed, proceeding to confirmation...');
 
             // Confirm migration
             const confirmed = await this.confirmMigration(config, collections);
@@ -56,6 +58,7 @@ class MongoMigrationTool {
                 this.logger.warn('Migration cancelled by user');
                 return;
             }
+            this.logger.info('✅ Migration confirmed, starting migration process...');
 
             // Perform migration
             await this.performMigration(config, collections);
@@ -85,12 +88,25 @@ class MongoMigrationTool {
         const destinationConfig = await this.getDbConfig('destination');
 
         // Get migration options
-        const { dropTarget } = await inquirer.prompt([
+        const { dropTarget, parallelProcesses } = await inquirer.prompt([
             {
                 type: 'confirm',
                 name: 'dropTarget',
                 message: 'Drop destination database before migration?',
                 default: false
+            },
+            {
+                type: 'number',
+                name: 'parallelProcesses',
+                message: 'Number of parallel processes for dump/restore operations:',
+                default: 3,
+                validate: (input) => {
+                    const num = parseInt(input);
+                    if (isNaN(num) || num < 1 || num > 10) {
+                        return 'Please enter a number between 1 and 10';
+                    }
+                    return true;
+                }
             }
         ]);
 
@@ -98,7 +114,8 @@ class MongoMigrationTool {
             source: sourceConfig,
             destination: destinationConfig,
             options: {
-                dropTarget
+                dropTarget,
+                parallelProcesses: parseInt(parallelProcesses)
             }
         };
     }
@@ -236,34 +253,44 @@ class MongoMigrationTool {
 
             const db = client.db(sourceConfig.database);
             const collections = await db.listCollections().toArray();
-            const collectionNames = collections.map(col => col.name).sort();
+
+            // Filter out system collections that shouldn't be migrated
+            const userCollections = collections.filter(col => {
+                const name = col.name;
+                return !name.startsWith('system.') &&
+                    !name.startsWith('fs.') &&
+                    name !== 'oplog.rs' &&
+                    name !== '__schema' &&
+                    col.type === 'collection'; // Only include actual collections, not views
+            });
+
+            // Log excluded collections for transparency
+            const excludedCollections = collections.filter(col => {
+                const name = col.name;
+                return name.startsWith('system.') ||
+                    name.startsWith('fs.') ||
+                    name === 'oplog.rs' ||
+                    name === '__schema' ||
+                    col.type !== 'collection';
+            });
+
+            const collectionNames = userCollections.map(col => col.name).sort();
 
             await client.close();
-            spinner.succeed(`Found ${collectionNames.length} collections`);
+            spinner.succeed(`Found ${collectionNames.length} user collections (${excludedCollections.length} system collections excluded)`);
+
+            if (excludedCollections.length > 0) {
+                this.logger.info(`📋 Excluded system collections: ${excludedCollections.map(col => col.name).join(', ')}`);
+            }
 
             if (collectionNames.length === 0) {
-                throw new Error('No collections found in source database');
+                throw new Error('No user collections found in source database');
             }
 
-            const choices = [
-                { name: '🔄 All collections', value: 'all' },
-                new inquirer.Separator(),
-                ...collectionNames.map(name => ({ name: `📄 ${name}`, value: name }))
-            ];
+            // Use enhanced collection selector with "a" key support
+            const selectedCollections = await this.selectCollectionsWithToggle(collectionNames);
 
-            const { selectedCollections } = await inquirer.prompt([
-                {
-                    type: 'checkbox',
-                    name: 'selectedCollections',
-                    message: 'Select collections to migrate:',
-                    choices,
-                    validate: (input) => input.length > 0 || 'Please select at least one option'
-                }
-            ]);
-
-            if (selectedCollections.includes('all')) {
-                return collectionNames;
-            }
+            this.logger.info(`✅ Selected ${selectedCollections.length} collections: ${selectedCollections.join(', ')}`);
 
             return selectedCollections;
 
@@ -271,6 +298,158 @@ class MongoMigrationTool {
             spinner.fail('Failed to fetch collections');
             throw error;
         }
+    }
+
+    async selectCollectionsWithToggle(collectionNames) {
+        return new Promise((resolve, reject) => {
+            let selectedCollections = new Set();
+            let currentIndex = 0;
+            let scrollOffset = 0;
+            const maxVisibleItems = 15; // Maximum number of collections to show at once
+
+            const renderCollections = () => {
+                console.clear();
+                console.log(chalk.cyan('\n📦 Select collections to migrate:\n'));
+                console.log(chalk.yellow('Controls:'));
+                console.log(chalk.white('  ↑/↓  - Navigate'));
+                console.log(chalk.white('  Space - Toggle selection'));
+                console.log(chalk.white('  a     - Toggle all collections'));
+                console.log(chalk.white('  Enter - Confirm selection'));
+                console.log(chalk.white('  q     - Quit'));
+                console.log('');
+
+                // Calculate scroll window
+                const totalItems = collectionNames.length;
+                const startIndex = scrollOffset;
+                const endIndex = Math.min(startIndex + maxVisibleItems, totalItems);
+
+                // Show scroll indicators if needed
+                if (totalItems > maxVisibleItems) {
+                    const currentPage = Math.floor(currentIndex / maxVisibleItems) + 1;
+                    const totalPages = Math.ceil(totalItems / maxVisibleItems);
+                    console.log(chalk.gray(`Page ${currentPage}/${totalPages} (${currentIndex + 1}/${totalItems})`));
+
+                    if (startIndex > 0) {
+                        console.log(chalk.gray('  ↑ More items above...'));
+                    }
+                }
+
+                // Display visible collections
+                for (let i = startIndex; i < endIndex; i++) {
+                    const collection = collectionNames[i];
+                    const isSelected = selectedCollections.has(collection);
+                    const isCurrent = i === currentIndex;
+                    const checkbox = isSelected ? '☑️' : '☐';
+                    const pointer = isCurrent ? '▶' : ' ';
+                    const nameColor = isSelected ? chalk.green : chalk.white;
+
+                    console.log(`${pointer} ${checkbox} ${nameColor(`📄 ${collection}`)}`);
+                }
+
+                // Show scroll indicator for items below
+                if (totalItems > maxVisibleItems && endIndex < totalItems) {
+                    console.log(chalk.gray('  ↓ More items below...'));
+                }
+
+                console.log('');
+                console.log(chalk.blue(`Selected: ${selectedCollections.size}/${collectionNames.length} collections`));
+                if (selectedCollections.size > 0) {
+                    const selectedList = Array.from(selectedCollections);
+                    const displayList = selectedList.length > 5
+                        ? `${selectedList.slice(0, 5).join(', ')}... (+${selectedList.length - 5} more)`
+                        : selectedList.join(', ');
+                    console.log(chalk.gray(`[${displayList}]`));
+                }
+            };
+
+            const updateScrollOffset = () => {
+                // Keep current item in view
+                if (currentIndex < scrollOffset) {
+                    scrollOffset = currentIndex;
+                } else if (currentIndex >= scrollOffset + maxVisibleItems) {
+                    scrollOffset = currentIndex - maxVisibleItems + 1;
+                }
+                // Ensure scroll offset is within bounds
+                scrollOffset = Math.max(0, Math.min(scrollOffset, collectionNames.length - maxVisibleItems));
+            };
+
+            const cleanup = () => {
+                // Restore terminal to normal mode
+                if (process.stdin.isTTY && process.stdin.setRawMode) {
+                    process.stdin.setRawMode(false);
+                }
+                process.stdin.removeAllListeners('data');
+                process.stdin.removeAllListeners('keypress');
+
+                // Pause stdin to reset it completely
+                process.stdin.pause();
+            };
+
+            const handleKeypress = (str) => {
+                if (str === '\u0003') { // Ctrl+C
+                    cleanup();
+                    reject(new Error('Selection cancelled by user'));
+                    return;
+                }
+
+                // Handle raw input
+                if (str === '\u001b[A') { // Up arrow
+                    currentIndex = Math.max(0, currentIndex - 1);
+                    updateScrollOffset();
+                    renderCollections();
+                } else if (str === '\u001b[B') { // Down arrow
+                    currentIndex = Math.min(collectionNames.length - 1, currentIndex + 1);
+                    updateScrollOffset();
+                    renderCollections();
+                } else if (str === ' ') { // Space
+                    const collection = collectionNames[currentIndex];
+                    if (selectedCollections.has(collection)) {
+                        selectedCollections.delete(collection);
+                    } else {
+                        selectedCollections.add(collection);
+                    }
+                    renderCollections();
+                } else if (str === 'a' || str === 'A') { // Toggle all
+                    if (selectedCollections.size === collectionNames.length) {
+                        // Unselect all
+                        selectedCollections.clear();
+                    } else {
+                        // Select all
+                        collectionNames.forEach(col => selectedCollections.add(col));
+                    }
+                    renderCollections();
+                } else if (str === '\r' || str === '\n') { // Enter
+                    if (selectedCollections.size === 0) {
+                        console.log(chalk.red('\n❌ Please select at least one collection'));
+                        setTimeout(() => renderCollections(), 1500);
+                        return;
+                    }
+                    cleanup();
+                    // Longer delay to ensure terminal is fully restored
+                    setTimeout(() => {
+                        resolve(Array.from(selectedCollections));
+                    }, 200);
+                    return;
+                } else if (str === 'q' || str === 'Q') { // Quit
+                    cleanup();
+                    setTimeout(() => {
+                        reject(new Error('Selection cancelled by user'));
+                    }, 200);
+                    return;
+                }
+            };
+
+            // Set up raw mode for keypress detection
+            if (process.stdin.isTTY && process.stdin.setRawMode) {
+                process.stdin.setRawMode(true);
+            }
+            process.stdin.resume();
+            process.stdin.setEncoding('utf8');
+            process.stdin.on('data', handleKeypress);
+
+            // Start the interface
+            renderCollections();
+        });
     }
 
     async confirmMigration(config, collections) {
@@ -290,6 +469,9 @@ class MongoMigrationTool {
         console.log(chalk.blue('  Destination DB:'), chalk.white(config.destination.database));
         console.log(chalk.blue('  Collections:'), chalk.white(collections.join(', ')));
         console.log(chalk.blue('  Drop target:'), chalk.white(config.options.dropTarget ? 'Yes' : 'No'));
+        console.log(chalk.blue('  Parallel processes:'), chalk.white(config.options.parallelProcesses));
+
+        this.logger.info('🤔 Waiting for user confirmation...');
 
         const { confirmed } = await inquirer.prompt([
             {
@@ -300,18 +482,21 @@ class MongoMigrationTool {
             }
         ]);
 
+        this.logger.info(`📝 User response: ${confirmed ? 'Confirmed' : 'Cancelled'}`);
+
         return confirmed;
     }
 
     async performMigration(config, collections) {
         this.logger.info('🔄 Starting migration process...');
+        this.logger.info(`⚡ Using ${config.options.parallelProcesses} parallel processes`);
 
         // Create temp directory
         await this.ensureTempDir();
 
         try {
             // Step 1: Dump data
-            await this.dumpData(config.source, collections);
+            await this.dumpData(config.source, collections, config.options.parallelProcesses);
 
             // Step 2: Drop destination if requested
             if (config.options.dropTarget) {
@@ -319,7 +504,7 @@ class MongoMigrationTool {
             }
 
             // Step 3: Restore data
-            await this.restoreData(config.destination, collections);
+            await this.restoreData(config.destination, collections, config.options.parallelProcesses);
 
         } catch (error) {
             throw new Error(`Migration failed: ${error.message}`);
@@ -339,31 +524,79 @@ class MongoMigrationTool {
         this.logger.info(`📁 Created temporary directory: ${this.tempDir}`);
     }
 
-    async dumpData(sourceConfig, collections) {
+    chunkArray(array, chunkSize) {
+        const chunks = [];
+        for (let i = 0; i < array.length; i += chunkSize) {
+            chunks.push(array.slice(i, i + chunkSize));
+        }
+        return chunks;
+    }
+
+    distributeCollections(collections, numWorkers) {
+        const workers = Array.from({ length: numWorkers }, () => []);
+        collections.forEach((collection, index) => {
+            workers[index % numWorkers].push(collection);
+        });
+        return workers.filter(worker => worker.length > 0);
+    }
+
+    async dumpData(sourceConfig, collections, parallelProcesses = 3) {
         this.logger.info('📤 Starting data dump...');
+        this.logger.info(`📊 Processing ${collections.length} collections with ${parallelProcesses} parallel processes`);
 
         const dumpPath = path.join(this.tempDir, 'dump');
 
-        for (const collection of collections) {
-            const spinner = ora(`Dumping collection: ${collection}`).start();
+        // Distribute collections among workers
+        const workerCollections = this.distributeCollections(collections, parallelProcesses);
+        const results = { successful: [], failed: [] };
 
-            try {
-                const args = [
-                    '--uri', sourceConfig.uri,
-                    '--db', sourceConfig.database,
-                    '--collection', collection,
-                    '--out', dumpPath
-                ];
+        this.logger.info(`👥 Starting ${workerCollections.length} workers:`);
+        workerCollections.forEach((collections, index) => {
+            this.logger.info(`   Worker ${index + 1}: ${collections.length} collections [${collections.join(', ')}]`);
+        });
 
-                await this.executeCommand('mongodump', args);
-                spinner.succeed(`Dumped: ${collection}`);
+        // Process workers in parallel
+        const workerPromises = workerCollections.map(async (workerCollections, workerIndex) => {
+            const workerId = workerIndex + 1;
+            this.logger.info(`🔄 Worker ${workerId} started processing ${workerCollections.length} collections`);
 
-                this.logger.success(`✅ Successfully dumped collection: ${collection}`);
+            for (const collection of workerCollections) {
+                this.logger.info(`📦 Worker ${workerId}: Starting dump of collection '${collection}'`);
 
-            } catch (error) {
-                spinner.fail(`Failed to dump: ${collection}`);
-                throw new Error(`Failed to dump collection ${collection}: ${error.message}`);
+                try {
+                    const args = [
+                        '--uri', sourceConfig.uri,
+                        '--db', sourceConfig.database,
+                        '--collection', collection,
+                        '--out', dumpPath
+                    ];
+
+                    await this.executeCommand('mongodump', args);
+
+                    results.successful.push(collection);
+                    this.logger.success(`✅ Worker ${workerId}: Successfully dumped collection '${collection}'`);
+
+                } catch (error) {
+                    results.failed.push({ collection, error: error.message, worker: workerId });
+                    this.logger.error(`❌ Worker ${workerId}: Failed to dump collection '${collection}': ${error.message}`);
+                }
             }
+
+            this.logger.info(`🏁 Worker ${workerId} completed processing ${workerCollections.length} collections`);
+        });
+
+        // Wait for all workers to complete
+        await Promise.all(workerPromises);
+
+        // Report final results
+        this.logger.info(`📊 Dump Summary: ${results.successful.length} successful, ${results.failed.length} failed`);
+
+        if (results.failed.length > 0) {
+            this.logger.warn('⚠️ Failed collections:');
+            results.failed.forEach(({ collection, error, worker }) => {
+                this.logger.warn(`  - Worker ${worker}: ${collection} - ${error}`);
+            });
+            throw new Error(`Failed to dump ${results.failed.length} collections`);
         }
     }
 
@@ -387,49 +620,80 @@ class MongoMigrationTool {
         }
     }
 
-    async restoreData(destConfig, collections) {
+    async restoreData(destConfig, collections, parallelProcesses = 3) {
         this.logger.info('📥 Starting data restore...');
+        this.logger.info(`📊 Processing ${collections.length} collections with ${parallelProcesses} parallel processes`);
 
         const dumpPath = path.join(this.tempDir, 'dump');
 
-        for (const collection of collections) {
-            const spinner = ora(`Restoring collection: ${collection}`).start();
+        // Find the source database directory in the dump
+        const dumpContents = await fs.readdir(dumpPath);
+        const sourceDumpDir = dumpContents.find(dir => dir !== '.DS_Store');
 
-            try {
-                // mongodump creates a directory structure: dump/<source_database_name>/<collection>.bson
-                // We need to find the actual source database directory in the dump
-                const dumpContents = await fs.readdir(dumpPath);
-                const sourceDumpDir = dumpContents.find(dir => dir !== '.DS_Store'); // Get the first directory
+        if (!sourceDumpDir) {
+            throw new Error(`No database dump directory found in ${dumpPath}`);
+        }
 
-                if (!sourceDumpDir) {
-                    throw new Error(`No database dump directory found in ${dumpPath}`);
-                }
+        // Distribute collections among workers
+        const workerCollections = this.distributeCollections(collections, parallelProcesses);
+        const results = { successful: [], failed: [] };
 
-                const collectionDumpPath = path.join(dumpPath, sourceDumpDir, `${collection}.bson`);
+        this.logger.info(`👥 Starting ${workerCollections.length} workers:`);
+        workerCollections.forEach((collections, index) => {
+            this.logger.info(`   Worker ${index + 1}: ${collections.length} collections [${collections.join(', ')}]`);
+        });
 
-                // Check if dump file exists
+        // Process workers in parallel
+        const workerPromises = workerCollections.map(async (workerCollections, workerIndex) => {
+            const workerId = workerIndex + 1;
+            this.logger.info(`🔄 Worker ${workerId} started processing ${workerCollections.length} collections`);
+
+            for (const collection of workerCollections) {
+                this.logger.info(`📦 Worker ${workerId}: Starting restore of collection '${collection}'`);
+
                 try {
-                    await fs.access(collectionDumpPath);
-                } catch {
-                    throw new Error(`Dump file not found: ${collectionDumpPath}`);
+                    const collectionDumpPath = path.join(dumpPath, sourceDumpDir, `${collection}.bson`);
+
+                    // Check if dump file exists
+                    try {
+                        await fs.access(collectionDumpPath);
+                    } catch {
+                        throw new Error(`Dump file not found: ${collectionDumpPath}`);
+                    }
+
+                    const args = [
+                        '--uri', destConfig.uri,
+                        '--db', destConfig.database,
+                        '--collection', collection,
+                        collectionDumpPath
+                    ];
+
+                    await this.executeCommand('mongorestore', args);
+
+                    results.successful.push(collection);
+                    this.logger.success(`✅ Worker ${workerId}: Successfully restored collection '${collection}'`);
+
+                } catch (error) {
+                    results.failed.push({ collection, error: error.message, worker: workerId });
+                    this.logger.error(`❌ Worker ${workerId}: Failed to restore collection '${collection}': ${error.message}`);
                 }
-
-                const args = [
-                    '--uri', destConfig.uri,
-                    '--db', destConfig.database,
-                    '--collection', collection,
-                    collectionDumpPath
-                ];
-
-                await this.executeCommand('mongorestore', args);
-                spinner.succeed(`Restored: ${collection}`);
-
-                this.logger.success(`✅ Successfully restored collection: ${collection}`);
-
-            } catch (error) {
-                spinner.fail(`Failed to restore: ${collection}`);
-                throw new Error(`Failed to restore collection ${collection}: ${error.message}`);
             }
+
+            this.logger.info(`🏁 Worker ${workerId} completed processing ${workerCollections.length} collections`);
+        });
+
+        // Wait for all workers to complete
+        await Promise.all(workerPromises);
+
+        // Report final results
+        this.logger.info(`📊 Restore Summary: ${results.successful.length} successful, ${results.failed.length} failed`);
+
+        if (results.failed.length > 0) {
+            this.logger.warn('⚠️ Failed collections:');
+            results.failed.forEach(({ collection, error, worker }) => {
+                this.logger.warn(`  - Worker ${worker}: ${collection} - ${error}`);
+            });
+            throw new Error(`Failed to restore ${results.failed.length} collections`);
         }
     }
 
@@ -481,26 +745,30 @@ class Logger {
         this.logLevel = 'info'; // debug, info, warn, error
     }
 
+    getTimestamp() {
+        return new Date().toISOString().replace('T', ' ').substring(0, 19);
+    }
+
     debug(message, ...args) {
         if (this.logLevel === 'debug') {
-            console.log(chalk.gray(`[DEBUG] ${new Date().toISOString()} - ${message}`), ...args);
+            console.log(chalk.gray(`[DEBUG] ${this.getTimestamp()} - ${message}`), ...args);
         }
     }
 
     info(message, ...args) {
-        console.log(chalk.cyan(`[INFO] ${new Date().toISOString()} - ${message}`), ...args);
+        console.log(chalk.cyan(`[INFO]  ${this.getTimestamp()} - ${message}`), ...args);
     }
 
     success(message, ...args) {
-        console.log(chalk.green(`[SUCCESS] ${new Date().toISOString()} - ${message}`), ...args);
+        console.log(chalk.green(`[SUCCESS] ${this.getTimestamp()} - ${message}`), ...args);
     }
 
     warn(message, ...args) {
-        console.log(chalk.yellow(`[WARN] ${new Date().toISOString()} - ${message}`), ...args);
+        console.log(chalk.yellow(`[WARN]  ${this.getTimestamp()} - ${message}`), ...args);
     }
 
     error(message, ...args) {
-        console.log(chalk.red(`[ERROR] ${new Date().toISOString()} - ${message}`), ...args);
+        console.log(chalk.red(`[ERROR] ${this.getTimestamp()} - ${message}`), ...args);
     }
 }
 
